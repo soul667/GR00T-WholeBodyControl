@@ -2,10 +2,21 @@
 
 #include <array>
 #include <cctype>
+#include <cerrno>
 #include <charconv>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <string>
 #include <string_view>
+
+// libstdc++ < 11 (e.g. GCC 10 on JetPack 5 / Ubuntu 20.04) lacks floating-point
+// std::from_chars / std::to_chars; fall back to strtof / snprintf there.
+#if defined(__cpp_lib_to_chars) && __cpp_lib_to_chars >= 201611L
+#define GAIN_SCALING_HAS_FP_CHARCONV 1
+#else
+#define GAIN_SCALING_HAS_FP_CHARCONV 0
+#endif
 
 namespace {
 
@@ -43,12 +54,32 @@ std::optional<float> parse_scale(std::string_view value, std::string& error) {
   }
 
   float scale = 0.0F;
+#if GAIN_SCALING_HAS_FP_CHARCONV
   const auto result = std::from_chars(value.data(), value.data() + value.size(),
                                       scale, std::chars_format::general);
   if (result.ec != std::errc{} || result.ptr != value.data() + value.size()) {
     error = "invalid scale factor '" + std::string(value) + "'";
     return std::nullopt;
   }
+#else
+  // Restrict to the chars_format::general grammar so strtof cannot accept
+  // hex floats, inf/nan or whitespace that from_chars would reject.
+  for (const char c : value) {
+    if (!std::isdigit(static_cast<unsigned char>(c)) && c != '.' && c != 'e' &&
+        c != 'E' && c != '+' && c != '-') {
+      error = "invalid scale factor '" + std::string(value) + "'";
+      return std::nullopt;
+    }
+  }
+  const std::string text(value);
+  char* end = nullptr;
+  errno = 0;
+  scale = std::strtof(text.c_str(), &end);
+  if (errno != 0 || end != text.c_str() + text.size()) {
+    error = "invalid scale factor '" + std::string(value) + "'";
+    return std::nullopt;
+  }
+#endif
   if (scale > kMaxScaleFactor) {
     error = "scale factor must be in [0, 4]: '" + std::string(value) + "'";
     return std::nullopt;
@@ -106,9 +137,15 @@ bool select_motor_range(
 
 std::string format_scale(float scale) {
   std::array<char, 32> buffer;
+#if GAIN_SCALING_HAS_FP_CHARCONV
   const auto result =
       std::to_chars(buffer.data(), buffer.data() + buffer.size(), scale);
   return std::string(buffer.data(), result.ptr);
+#else
+  const int length =
+      std::snprintf(buffer.data(), buffer.size(), "%g", static_cast<double>(scale));
+  return std::string(buffer.data(), length > 0 ? length : 0);
+#endif
 }
 
 }  // namespace

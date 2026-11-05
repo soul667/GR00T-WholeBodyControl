@@ -12,6 +12,11 @@
 #include <NvInfer.h>
 #include <NvOnnxParser.h>
 
+// Compatibility with older TensorRT (e.g. JetPack 5.x / TRT 8.5 on G1 Orin/Xavier):
+// kFP8 appeared in 8.6, kINT64/kBF16 in 9.0.
+#define TRT_VERSION_AT_LEAST( major, minor ) \
+    ( NV_TENSORRT_MAJOR > ( major ) || ( NV_TENSORRT_MAJOR == ( major ) && NV_TENSORRT_MINOR >= ( minor ) ) )
+
 namespace
 {
     class Logger : public nvinfer1::ILogger
@@ -82,9 +87,11 @@ namespace
         int size = -1;
         switch ( dataType )
         {
+#if TRT_VERSION_AT_LEAST( 9, 0 )
             case nvinfer1::DataType::kINT64:
             size = sizeof( uint64_t );
             break;
+#endif
             
             case nvinfer1::DataType::kINT32:
             case nvinfer1::DataType::kFLOAT:
@@ -92,11 +99,15 @@ namespace
             break;
             
             case nvinfer1::DataType::kHALF:
+#if TRT_VERSION_AT_LEAST( 9, 0 )
             case nvinfer1::DataType::kBF16:
+#endif
             size = sizeof( uint16_t );
             break;
             
+#if TRT_VERSION_AT_LEAST( 8, 6 )
             case nvinfer1::DataType::kFP8:
+#endif
             case nvinfer1::DataType::kINT8:
             case nvinfer1::DataType::kBOOL:
             case nvinfer1::DataType::kUINT8:
@@ -785,8 +796,10 @@ DataType TRTInferenceEngine::GetTensorDataType(std::string name) const
         return DataType::BOOL;
         case nvinfer1::DataType::kUINT8:
         return DataType::UINT8;
+#if TRT_VERSION_AT_LEAST( 9, 0 )
         case nvinfer1::DataType::kINT64:
         return DataType::INT64;
+#endif
         default:
         LOG_ERROR("ValidateTensorSize: Tensor " + name + " not found.");
         return DataType::UNKNOWN;
