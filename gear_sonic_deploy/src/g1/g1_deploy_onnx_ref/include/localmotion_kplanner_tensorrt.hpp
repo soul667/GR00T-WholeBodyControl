@@ -38,6 +38,7 @@
 
 #include <TRTInference/InferenceEngine.h>
 #include <iostream>
+#include <map>
 #include "localmotion_kplanner.hpp"
 #include <cuda_runtime.h>
 
@@ -181,6 +182,9 @@ private:
     TPinnedVector<float> specific_target_positions_;    ///< [12] 4 waypoint positions × xyz.
     TPinnedVector<float> specific_target_headings_;     ///< [4]  4 waypoint heading angles.
     TPinnedVector<int64_t> allowed_pred_num_tokens_;    ///< [11] Allowed prediction token mask.
+
+    /// int32 copies of the int64 inputs, kept alive for the async copies on TensorRT < 9.
+    std::map<std::string, TPinnedVector<int32_t>> narrowed_int_inputs_;
 
     // ------------------------------------------------------------------
     // Output data buffers (pinned memory)
@@ -349,22 +353,36 @@ private:
         return true;
     }
     
+    /// TensorRT < 9 imports int64 ONNX inputs as int32, so narrow them when the engine asks for it.
+    void SetIntInputAsync(const std::string& name, const TPinnedVector<int64_t>& values) {
+        if (inference_engine_->GetTensorDataType(name) == DataType::INT64) {
+            inference_engine_->SetInputDataAsync(name, values, cuda_stream_);
+            return;
+        }
+        auto& narrowed = narrowed_int_inputs_[name];
+        narrowed.resize(values.size());
+        for (size_t i = 0; i < values.size(); ++i) {
+            narrowed[i] = static_cast<int32_t>(values[i]);
+        }
+        inference_engine_->SetInputDataAsync(name, narrowed, cuda_stream_);
+    }
+
     /// Async GPU inference: copy inputs → launch CUDA graph → copy outputs → synchronise.
     void RunInference() override {
         inference_engine_->SetInputDataAsync(tensor_names_.context_qpos, context_qpos_values_, cuda_stream_);
         inference_engine_->SetInputDataAsync(tensor_names_.facing_direction, facing_direction_values_, cuda_stream_);
-        inference_engine_->SetInputDataAsync(tensor_names_.mode, mode_values_, cuda_stream_);
+        SetIntInputAsync(tensor_names_.mode, mode_values_);
         inference_engine_->SetInputDataAsync(tensor_names_.target_vel, target_vel_values_, cuda_stream_);
         inference_engine_->SetInputDataAsync(tensor_names_.movement_direction, movement_direction_values_, cuda_stream_);
-        inference_engine_->SetInputDataAsync(tensor_names_.random_seed, random_seed_values_, cuda_stream_);
+        SetIntInputAsync(tensor_names_.random_seed, random_seed_values_);
         
         if (config_.version == 1 || config_.version == 2)
         {
             inference_engine_->SetInputDataAsync(tensor_names_.target_height, target_height_values_, cuda_stream_);
-            inference_engine_->SetInputDataAsync(tensor_names_.has_specific_target, has_specific_target_, cuda_stream_);
+            SetIntInputAsync(tensor_names_.has_specific_target, has_specific_target_);
             inference_engine_->SetInputDataAsync(tensor_names_.specific_target_positions, specific_target_positions_, cuda_stream_);
             inference_engine_->SetInputDataAsync(tensor_names_.specific_target_headings, specific_target_headings_, cuda_stream_);
-            inference_engine_->SetInputDataAsync(tensor_names_.allowed_pred_num_tokens, allowed_pred_num_tokens_, cuda_stream_);
+            SetIntInputAsync(tensor_names_.allowed_pred_num_tokens, allowed_pred_num_tokens_);
         }
         
         cudaGraphLaunch(graphExec_, cuda_stream_);
